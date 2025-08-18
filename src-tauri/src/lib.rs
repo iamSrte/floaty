@@ -1,3 +1,9 @@
+use std::sync::Mutex;
+use tauri::Manager;
+
+mod db;
+mod state;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -9,6 +15,15 @@ pub fn run() {
             .build(),
         )?;
       }
+      let mut connection = db::establish_connection();
+      
+      db::run_migrations(&mut connection)
+        .expect("Failed to run database migrations.");
+
+      let app_state = state::AppStateInner {
+          db_connection: connection,
+      };
+      app.manage(Mutex::new(app_state));
       Ok(())
     })
     .run(tauri::generate_context!())
