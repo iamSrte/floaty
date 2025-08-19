@@ -1,11 +1,11 @@
+use crate::db::schema::{floats, reminders, timers};
 use diesel::prelude::*;
 use diesel::sqlite::Sqlite;
-use crate::db::schema::{reminders, timers, floats};
-
+use serde::{Deserialize, Serialize};
 
 // --- Reminder Models ---
 
-#[derive(Queryable, Selectable)]
+#[derive(Queryable, Selectable, Serialize, Deserialize)]
 #[diesel(table_name = reminders)]
 #[diesel(check_for_backend(Sqlite))]
 pub struct Reminder {
@@ -19,7 +19,7 @@ pub struct Reminder {
     pub created_at: String,
 }
 
-#[derive(Queryable, Selectable)]
+#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize)]
 #[diesel(table_name = reminders)]
 #[diesel(check_for_backend(Sqlite))]
 pub struct NewReminder {
@@ -31,10 +31,9 @@ pub struct NewReminder {
     pub is_active: i32,
 }
 
-
 // --- Timer Models ---
 
-#[derive(Queryable, Selectable)]
+#[derive(Queryable, Selectable, Serialize, Deserialize)]
 #[diesel(table_name = timers)]
 #[diesel(check_for_backend(Sqlite))]
 pub struct Timer {
@@ -48,7 +47,7 @@ pub struct Timer {
     pub created_at: String,
 }
 
-#[derive(Queryable, Selectable)]
+#[derive(Queryable, Selectable, Serialize, Deserialize)]
 #[diesel(table_name = timers)]
 #[diesel(check_for_backend(Sqlite))]
 pub struct NewTimer {
@@ -58,10 +57,9 @@ pub struct NewTimer {
     pub status: String,
 }
 
-
 // --- Float Models ---
 
-#[derive(Queryable, Selectable)]
+#[derive(Queryable, Selectable, Serialize, Deserialize)]
 #[diesel(table_name = floats)]
 #[diesel(check_for_backend(Sqlite))]
 pub struct Float {
@@ -77,7 +75,7 @@ pub struct Float {
     pub created_at: String,
 }
 
-#[derive(Queryable, Selectable)]
+#[derive(Queryable, Selectable, Serialize, Deserialize)]
 #[diesel(table_name = floats)]
 #[diesel(check_for_backend(Sqlite))]
 pub struct NewFloat {
