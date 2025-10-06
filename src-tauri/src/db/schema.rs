@@ -11,7 +11,7 @@ diesel::table! {
         window_width -> Integer,
         window_height -> Integer,
         is_visible -> Integer,
-        created_at -> Text,
+        created_at -> Timestamp,
     }
 }
 
@@ -20,11 +20,11 @@ diesel::table! {
         id -> Integer,
         title -> Text,
         body -> Nullable<Text>,
-        trigger_time -> Text,
+        trigger_time -> Timestamp,
         is_recurring -> Integer,
         recurrence_rule -> Nullable<Text>,
         is_active -> Integer,
-        created_at -> Text,
+        created_at -> Timestamp,
     }
 }
 
@@ -34,10 +34,10 @@ diesel::table! {
         label -> Nullable<Text>,
         duration_seconds -> Integer,
         timer_type -> Text,
-        start_time -> Nullable<Text>,
-        end_time -> Nullable<Text>,
+        start_time -> Nullable<Timestamp>,
+        end_time -> Nullable<Timestamp>,
         status -> Text,
-        created_at -> Text,
+        created_at -> Timestamp,
     }
 }
 

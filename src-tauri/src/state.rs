@@ -1,9 +1,12 @@
-use crate::error::AppError;
 use diesel::sqlite::SqliteConnection;
 use std::sync::{Mutex, MutexGuard};
 use tauri::State;
 
+use crate::error::AppError;
+use crate::services::scheduler::Scheduler;
+
 pub struct AppStateInner {
+    pub scheduler: Scheduler,
     pub db_connection: SqliteConnection,
 }
 

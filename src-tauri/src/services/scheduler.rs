@@ -1,12 +1,17 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tauri::{AppHandle, Emitter};
+use tauri::async_runtime::JoinHandle;
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Mutex, Notify};
-use tokio::task::JoinHandle;
 
 use chrono::{DateTime, Utc};
 use min_heap::MinHeap;
+
+use crate::commands::reminders::get_all_reminders;
+use crate::db::models::Reminder;
+use crate::state::AppState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScheduleItemType {
@@ -18,6 +23,15 @@ pub enum ScheduleItemType {
 pub struct ScheduleItemIdentifier {
     pub item_type: ScheduleItemType,
     pub item_id: i32,
+}
+
+impl From<Reminder> for ScheduleItemIdentifier {
+    fn from(reminder: Reminder) -> Self {
+        ScheduleItemIdentifier {
+            item_type: ScheduleItemType::Reminder,
+            item_id: reminder.id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,35 +54,47 @@ impl PartialOrd for ScheduleItem {
     }
 }
 
+impl From<Reminder> for ScheduleItem {
+    fn from(reminder: Reminder) -> Self {
+        ScheduleItem {
+            identifier: ScheduleItemIdentifier {
+                item_type: ScheduleItemType::Reminder,
+                item_id: reminder.id,
+            },
+            trigger_time: reminder.trigger_time.and_utc(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Scheduler {
     heap: Arc<Mutex<MinHeap<ScheduleItem>>>,
     app_handle: AppHandle,
     wakeup_notify: Arc<Notify>,
-    scheduler_task: Option<JoinHandle<()>>,
+    scheduler_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl Scheduler {
-    pub fn new(app_handle: AppHandle) -> Self {
+    pub fn new(app_handle: &AppHandle) -> Self {
         let mut scheduler = Self {
             heap: Arc::new(Mutex::new(MinHeap::new())),
             app_handle: app_handle.clone(),
             wakeup_notify: Arc::new(Notify::new()),
-            scheduler_task: None,
+            scheduler_task: Arc::new(Mutex::new(None)),
         };
 
         // Start the main scheduler task
-        scheduler.scheduler_task = Some(scheduler.spawn_scheduler_task());
+        scheduler.scheduler_task = Arc::new(Mutex::new(Some(scheduler.spawn_task())));
         scheduler
     }
 
-    fn spawn_scheduler_task(&self) -> JoinHandle<()> {
+    fn spawn_task(&self) -> JoinHandle<()> {
         let heap = Arc::clone(&self.heap);
         let notify = Arc::clone(&self.wakeup_notify);
         let app_handle = self.app_handle.clone();
 
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             loop {
-                // Get next item and calculate sleep duration
                 let sleep_duration = {
                     let heap_guard = heap.lock().await;
 
@@ -76,23 +102,21 @@ impl Scheduler {
                         let now = Utc::now();
 
                         if next_item.trigger_time <= now {
-                            tokio::time::Duration::from_secs(0)
+                            Duration::from_secs(0)
                         } else {
                             let duration = next_item.trigger_time - now;
-                            duration
-                                .to_std()
-                                .unwrap_or(tokio::time::Duration::from_secs(0))
+                            duration.to_std().unwrap_or(Duration::from_secs(0))
                         }
                     } else {
                         // No items in heap, sleep for a while
-                        tokio::time::Duration::from_secs(3600) // 1 hour
+                        Duration::from_secs(3600) // 1 hour
                     }
                 };
 
                 // Sleep until next item or until interrupted
                 tokio::select! {
                     _ = tokio::time::sleep(sleep_duration) => {
-                        Self::trigger_due_items(&heap, &app_handle).await;
+                        trigger_due_items(&heap, &app_handle).await;
                     }
                     _ = notify.notified() => {
                         continue;
@@ -102,111 +126,40 @@ impl Scheduler {
         })
     }
 
-    async fn trigger_due_items(heap: &Arc<Mutex<MinHeap<ScheduleItem>>>, app_handle: &AppHandle) {
-        let now = Utc::now();
-        let mut heap_guard = heap.lock().await;
+    pub async fn add_item(&self, item: ScheduleItem) {
+        let mut heap_guard = self.heap.lock().await;
+        heap_guard.push(item);
+        drop(heap_guard);
 
-        // Process all due items
-        while let Some(next_item) = heap_guard.peek() {
-            if next_item.trigger_time <= now {
-                let item = heap_guard.pop().unwrap();
-                drop(heap_guard);
-                Self::trigger_item(&item, app_handle).await;
-                heap_guard = heap.lock().await;
-            } else {
-                break;
-            }
-        }
-    }
-
-    async fn trigger_item(item: &ScheduleItem, app_handle: &AppHandle) {
-        match item.identifier.item_type {
-            ScheduleItemType::Reminder => {
-                // Emit event to frontend
-                let _ = app_handle.emit("reminder_triggered", &item.identifier.item_id);
-
-                // Show system notification
-                Self::show_notification(app_handle, "Reminder").await;
-
-                println!("🔔 Reminder triggered (ID: {})", item.identifier.item_id);
-            }
-            ScheduleItemType::Timer => {
-                // Emit event to frontend
-                let _ = app_handle.emit("timer_completed", &item.identifier.item_id);
-
-                // Show system notification
-                Self::show_notification(app_handle, "Timer Completed").await;
-
-                println!("⏰ Timer completed (ID: {})", item.identifier.item_id);
-            }
-        }
-    }
-
-    async fn show_notification(app_handle: &AppHandle, title: &str) {
-        // TODO: Implement with tauri-plugin-notification
-        //       Probably need to move to another module
-    }
-
-    pub async fn add_schedule(&self, item: ScheduleItem) {
-        {
-            let mut heap_guard = self.heap.lock().await;
-            heap_guard.push(item);
-        }
-
-        // Wake up the scheduler to recalculate
         self.wakeup_notify.notify_one();
     }
 
     /// Remove an item from the schedule
-    pub async fn remove_schedule(&self, identifier: ScheduleItemIdentifier) {
-        {
-            let mut heap_guard = self.heap.lock().await;
+    pub async fn remove_item(&self, identifier: ScheduleItemIdentifier) {
+        let mut heap_guard = self.heap.lock().await;
 
-            // Rebuild heap without the target item
-            let filtered_items: MinHeap<ScheduleItem> = heap_guard
-                .drain()
-                .filter(|item| !(item.identifier == identifier))
-                .collect();
+        heap_guard.retain(|item| item.identifier != identifier);
+        drop(heap_guard);
 
-            *heap_guard = filtered_items;
-        }
-
-        // Wake up the scheduler
         self.wakeup_notify.notify_one();
     }
 
     /// Update an existing item's schedule
-    pub async fn update_schedule(
-        &self,
-        old_identifier: ScheduleItemIdentifier,
-        new_item: ScheduleItem,
-    ) {
-        // Remove old item
-        self.remove_schedule(old_identifier).await;
+    pub async fn update_item(&self, identifier: ScheduleItemIdentifier, new_item: ScheduleItem) {
+        let mut heap_guard = self.heap.lock().await;
 
-        // Add updated item
-        self.add_schedule(new_item).await;
-    }
+        // Rebuild heap without the target item
+        let filtered_items: MinHeap<ScheduleItem> = heap_guard
+            .drain()
+            .filter(|item| !(item.identifier == identifier))
+            .collect();
 
-    /// Convenience method for updating schedule with separate parameters
-    pub async fn update_schedule_by_params(
-        &self,
-        item_type: ScheduleItemType,
-        item_id: i32,
-        new_trigger_time: DateTime<Utc>,
-        new_title: String,
-    ) {
-        let old_identifier = ScheduleItemIdentifier {
-            item_type: item_type.clone(),
-            item_id,
-        };
-        let new_identifier = ScheduleItemIdentifier { item_type, item_id };
-        let new_item = ScheduleItem {
-            identifier: new_identifier,
-            trigger_time: new_trigger_time,
-        };
+        *heap_guard = filtered_items;
 
-        self.update_schedule(old_identifier, new_item).await;
+        heap_guard.push(new_item);
+        drop(heap_guard);
+
+        self.wakeup_notify.notify_one();
     }
 
     /// Get current schedule status (for debugging)
@@ -215,5 +168,79 @@ impl Scheduler {
         let count = heap_guard.len();
         let next_trigger = heap_guard.peek().map(|item| item.trigger_time);
         (count, next_trigger)
+    }
+
+    pub fn reload_from_db(&self) {
+        let heap = Arc::clone(&self.heap);
+        let notify = Arc::clone(&self.wakeup_notify);
+        let app_handle = self.app_handle.clone();
+
+        tauri::async_runtime::spawn(async move {
+            let state = app_handle.state::<AppState>();
+
+            let active_reminders = match get_all_reminders(state, true) {
+                Ok(reminders) => reminders,
+                Err(e) => {
+                    eprintln!("Error loading reminders: {}", e);
+                    return;
+                }
+            };
+            let now = Utc::now();
+            let schedule_items: Vec<ScheduleItem> = active_reminders
+                .into_iter()
+                .filter_map(|reminder| {
+                    let trigger_time_utc = reminder.trigger_time.and_utc();
+
+                    if trigger_time_utc > now {
+                        Some(ScheduleItem::from(reminder))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Clear the existing items in the heap
+            let mut heap_guard = heap.lock().await;
+            heap_guard.clear();
+
+            for item in schedule_items {
+                heap_guard.push(item);
+            }
+
+            drop(heap_guard);
+            notify.notify_one();
+        });
+    }
+}
+
+async fn trigger_due_items(heap: &Arc<Mutex<MinHeap<ScheduleItem>>>, app_handle: &AppHandle) {
+    let now = Utc::now();
+    let mut heap_guard = heap.lock().await;
+
+    // Process all due items
+    while let Some(next_item) = heap_guard.peek() {
+        if next_item.trigger_time <= now {
+            let item = heap_guard.pop().unwrap();
+            drop(heap_guard);
+            trigger_item(&item, app_handle).await;
+            heap_guard = heap.lock().await;
+        } else {
+            break;
+        }
+    }
+}
+
+async fn trigger_item(item: &ScheduleItem, app_handle: &AppHandle) {
+    match item.identifier.item_type {
+        ScheduleItemType::Reminder => {
+            // Emit event to frontend
+            let _ = app_handle.emit("reminder_triggered", &item.identifier.item_id);
+            println!("🔔 Reminder triggered (ID: {})", item.identifier.item_id);
+        }
+        ScheduleItemType::Timer => {
+            // Emit event to frontend
+            let _ = app_handle.emit("timer_completed", &item.identifier.item_id);
+            println!("⏰ Timer completed (ID: {})", item.identifier.item_id);
+        }
     }
 }
