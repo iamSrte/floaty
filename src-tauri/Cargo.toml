@@ -25,6 +25,7 @@ serde_json = "1.0"
 
 diesel = { version = "2.3.2", features = ["sqlite", "returning_clauses_for_sqlite_3_35", "chrono"] }
 diesel_migrations = { version = "2.3.0", features = ["sqlite"] }
+deadpool-diesel = { version = "0.6.1", features = ["sqlite", "rt_tokio_1"] }
 libsqlite3-sys = { version = "0.35.0", features = ["bundled"] }
 
 log = "0.4"

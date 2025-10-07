@@ -9,8 +9,11 @@ pub enum AppError {
     #[error(transparent)]
     DatabaseError(#[from] diesel::result::Error),
 
-    #[error("Could not acquire database lock")]
-    LockError,
+    #[error("Database pool error: {0}")]
+    PoolError(#[from] deadpool_diesel::PoolError),
+
+    #[error("Database interaction error: {0}")]
+    InteractError(#[from] deadpool_diesel::InteractError),
 }
 
 impl Serialize for AppError {

@@ -21,17 +21,46 @@ pub fn run() {
                 )?;
             }
 
-            let mut connection = db::establish_connection();
-            db::run_migrations(&mut connection).expect("Failed to run database migrations.");
+            // Initialize the database pool
+            let db_pool = db::create_pool();
 
+            // Run migrations
+            let pool_for_migration = db_pool.clone();
+            tauri::async_runtime::block_on(async {
+                let conn = pool_for_migration
+                    .get()
+                    .await
+                    .expect("Failed to get connection for migrations");
+
+                conn.interact(|conn| {
+                    db::run_migrations(conn).expect("Failed to run database migrations")
+                })
+                .await
+                .expect("Failed to interact with database for migrations");
+            });
+
+            // Initialize the scheduler
             let scheduler = Scheduler::new(app.handle());
-            scheduler.reload_from_db();
 
+            // Store the app state
             let app_state = state::AppStateInner {
-                scheduler: scheduler,
-                db_connection: connection,
+                scheduler: scheduler.clone(),
+                db_pool: db_pool.clone(),
             };
-            app.manage(Mutex::new(app_state));
+            app.manage(app_state);
+
+            // Reload scheduler from database
+            tauri::async_runtime::spawn(async move {
+                match scheduler.reload_from_db(db_pool).await {
+                    Ok(count) => {
+                        log::info!("Successfully loaded {} scheduled items", count);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to reload scheduler from database: {}", e);
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

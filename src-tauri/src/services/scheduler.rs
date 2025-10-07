@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use log::error;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Mutex, Notify};
@@ -11,6 +12,8 @@ use min_heap::MinHeap;
 
 use crate::commands::reminders::get_all_reminders;
 use crate::db::models::Reminder;
+use crate::db::DbPool;
+use crate::error::AppError;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,14 +151,7 @@ impl Scheduler {
     pub async fn update_item(&self, identifier: ScheduleItemIdentifier, new_item: ScheduleItem) {
         let mut heap_guard = self.heap.lock().await;
 
-        // Rebuild heap without the target item
-        let filtered_items: MinHeap<ScheduleItem> = heap_guard
-            .drain()
-            .filter(|item| !(item.identifier == identifier))
-            .collect();
-
-        *heap_guard = filtered_items;
-
+        heap_guard.retain(|item| item.identifier != identifier);
         heap_guard.push(new_item);
         drop(heap_guard);
 
@@ -170,46 +166,48 @@ impl Scheduler {
         (count, next_trigger)
     }
 
-    pub fn reload_from_db(&self) {
+    pub async fn reload_from_db(&self, db_pool: DbPool) -> Result<usize, AppError> {
         let heap = Arc::clone(&self.heap);
-        let notify = Arc::clone(&self.wakeup_notify);
-        let app_handle = self.app_handle.clone();
 
-        tauri::async_runtime::spawn(async move {
-            let state = app_handle.state::<AppState>();
+        let conn = db_pool.get().await?;
 
-            let active_reminders = match get_all_reminders(state, true) {
-                Ok(reminders) => reminders,
-                Err(e) => {
-                    eprintln!("Error loading reminders: {}", e);
-                    return;
+        // Temporarily untill i add a queries module
+        use diesel::prelude::*;
+        use crate::db::schema::reminders::dsl::*;
+        let active_reminders = conn
+            .interact(|conn| {
+                reminders
+                    .filter(is_active.eq(1))
+                    .select(Reminder::as_select())
+                    .load::<Reminder>(conn)
+            })
+            .await??;
+
+        let now = Utc::now();
+        let schedule_items: Vec<ScheduleItem> = active_reminders
+            .into_iter()
+            .filter_map(|reminder| {
+                let trigger_time_utc = reminder.trigger_time.and_utc();
+                if trigger_time_utc > now {
+                    Some(ScheduleItem::from(reminder))
+                } else {
+                    None
                 }
-            };
-            let now = Utc::now();
-            let schedule_items: Vec<ScheduleItem> = active_reminders
-                .into_iter()
-                .filter_map(|reminder| {
-                    let trigger_time_utc = reminder.trigger_time.and_utc();
+            })
+            .collect();
 
-                    if trigger_time_utc > now {
-                        Some(ScheduleItem::from(reminder))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+        let count = schedule_items.len();
 
-            // Clear the existing items in the heap
-            let mut heap_guard = heap.lock().await;
-            heap_guard.clear();
+        let mut heap_guard = heap.lock().await;
+        heap_guard.clear();
 
-            for item in schedule_items {
-                heap_guard.push(item);
-            }
+        for item in schedule_items {
+            heap_guard.push(item);
+        }
+        drop(heap_guard);
 
-            drop(heap_guard);
-            notify.notify_one();
-        });
+        self.wakeup_notify.notify_one();
+        Ok(count)
     }
 }
 
